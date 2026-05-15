@@ -79,7 +79,6 @@ import (
 	"unsafe"
 
 	"github.com/steigr/yaasa-go/desk"
-	"tinygo.org/x/bluetooth"
 )
 
 func main() {} // required for -buildmode=c-shared
@@ -139,8 +138,8 @@ func yaasa_scan(timeoutMS C.int64_t, cb C.yaasa_scan_cb, userData unsafe.Pointer
 	if timeout <= 0 {
 		timeout = 10 * time.Second
 	}
-	err := desk.Scan(timeout, func(addr bluetooth.Address, rssi int16, name string) {
-		cAddr := C.CString(addr.String())
+	err := desk.Scan(timeout, func(addr, name string, rssi int16) {
+		cAddr := C.CString(addr)
 		cName := C.CString(name)
 		C.call_scan_cb(cb, cAddr, C.int16_t(rssi), cName, userData)
 		C.free(unsafe.Pointer(cAddr))
