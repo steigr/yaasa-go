@@ -28,8 +28,7 @@ const (
 // write sends a raw command packet to the desk (write-without-response).
 func (d *Desk) write(pkt []byte) error {
 	d.verboseLogf("[BLE tx] % X", pkt)
-	_, err := d.cmdChar.WriteWithoutResponse(pkt)
-	return err
+	return d.conn.WriteCommand(pkt)
 }
 
 // Wake sends the wake command (opcode 0x00) three times with 100 ms gaps

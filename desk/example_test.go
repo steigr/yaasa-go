@@ -7,11 +7,10 @@ import (
 	"time"
 
 	"github.com/steigr/yaasa-go/desk"
-	"tinygo.org/x/bluetooth"
 )
 
 func ExampleScan() {
-	err := desk.Scan(10*time.Second, func(addr bluetooth.Address, rssi int16, name string) {
+	err := desk.Scan(10*time.Second, func(addr, name string, rssi int16) {
 		fmt.Printf("found  %s  rssi=%d  %s\n", addr, rssi, name)
 	})
 	if err != nil {

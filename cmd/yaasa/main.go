@@ -13,7 +13,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steigr/yaasa-go/desk"
 	"github.com/steigr/yaasa-go/internal/ipc"
-	"tinygo.org/x/bluetooth"
 )
 
 var (
@@ -161,17 +160,16 @@ func scanCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			fmt.Printf("Scanning for desks (%.0fs)...\n", scanTimeout.Seconds())
 			seen := make(map[string]bool)
-			err := desk.Scan(scanTimeout, func(addr bluetooth.Address, rssi int16, name string) {
-				key := addr.String()
-				if seen[key] {
+			err := desk.Scan(scanTimeout, func(addr, name string, rssi int16) {
+				if seen[addr] {
 					return
 				}
-				seen[key] = true
+				seen[addr] = true
 				label := name
 				if label == "" {
 					label = "(unknown)"
 				}
-				fmt.Printf("  %-45s  rssi=%-4d  %s\n", key, rssi, label)
+				fmt.Printf("  %-45s  rssi=%-4d  %s\n", addr, rssi, label)
 			})
 			if len(seen) == 0 {
 				fmt.Println("No desks found.")
@@ -740,9 +738,9 @@ func saveDefaultAddress(addr string) error {
 func scanFirstDesk(timeout time.Duration) (string, error) {
 	fmt.Fprintf(os.Stderr, "No default desk configured; scanning for FE60 desks (%s)...\n", timeout)
 	var first string
-	err := desk.Scan(timeout, func(addr bluetooth.Address, rssi int16, name string) {
+	err := desk.Scan(timeout, func(addr, name string, rssi int16) {
 		if first == "" {
-			first = addr.String()
+			first = addr
 			label := name
 			if label == "" {
 				label = "(unknown)"
@@ -766,9 +764,9 @@ func scanByName(pattern string, timeout time.Duration) (string, error) {
 	fmt.Fprintf(os.Stderr, "Scanning for desk with name matching %q (%s)...\n", pattern, timeout)
 	lower := strings.ToLower(pattern)
 	var found string
-	err := desk.Scan(timeout, func(addr bluetooth.Address, rssi int16, name string) {
+	err := desk.Scan(timeout, func(addr, name string, rssi int16) {
 		if found == "" && strings.Contains(strings.ToLower(name), lower) {
-			found = addr.String()
+			found = addr
 			fmt.Fprintf(os.Stderr, "  Matched: %s  rssi=%d  %s\n", found, rssi, name)
 		}
 	})

@@ -10,11 +10,11 @@
 //
 // Scan for nearby desks, then connect by address:
 //
-//	err := desk.Scan(10*time.Second, func(addr bluetooth.Address, rssi int16, name string) {
+//	err := desk.Scan(10*time.Second, func(addr, name string, rssi int16) {
 //		fmt.Println(addr, rssi, name)
 //	})
 //
-//	d, err := desk.Connect(addr.String(), 15*time.Second)
+//	d, err := desk.Connect(addr, 15*time.Second)
 //
 // Connect performs two-phase setup: it discovers GATT characteristics, waits
 // briefly for the BLE connection to stabilise, subscribes to FE62
