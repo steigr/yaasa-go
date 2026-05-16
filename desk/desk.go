@@ -106,6 +106,16 @@ func ConnectWith(a Adapter, addrStr string, connectTimeout time.Duration, opts .
 	d.verboseLogf("[BLE tx] (wake post-subscribe) % X", wakeCmd)
 	_ = conn.WriteCommand(wakeCmd)
 
+	// Pre-warm the height cache: send a RequestHeightLimits (0x07).  On the
+	// reference firmware this triggers a delayed (~4 s) opcode-0x01 height
+	// notification as a side effect, so the cache is populated before the
+	// first user query — making CurrentHeight() an instant cache hit instead
+	// of a 5 s slow path.  The write is fire-and-forget; if it fails the
+	// slow path in CurrentHeight still works.
+	statusCmd := protocol.MakeCommand(0x07)
+	d.verboseLogf("[BLE tx] (cache pre-warm) % X", statusCmd)
+	_ = conn.WriteCommand(statusCmd)
+
 	return d, nil
 }
 

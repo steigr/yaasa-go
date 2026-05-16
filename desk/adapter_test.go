@@ -183,14 +183,26 @@ func TestConnectWith_PopulatesInfo(t *testing.T) {
 	}
 }
 
-// TestConnectWith_SendsWakePulse checks that ConnectWith sends the wake
-// command (opcode 0x00) to FE61 after subscribing to FE62 notifications.
-func TestConnectWith_SendsWakePulse(t *testing.T) {
+// TestConnectWith_SendsWakeAndPrewarm verifies that ConnectWith sends, in
+// order, a wake command (opcode 0x00) and a RequestHeightLimits pre-warm
+// (opcode 0x07) — both after subscribing to FE62 notifications.
+func TestConnectWith_SendsWakeAndPrewarm(t *testing.T) {
 	_, conn := connectStub(t, desk.Info{})
-	want := protocol.MakeCommand(0x00)
-	got := conn.lastWritten()
-	if string(got) != string(want) {
-		t.Fatalf("last written = % X, want wake (% X)", got, want)
+	wantWake := protocol.MakeCommand(0x00)
+	wantWarm := protocol.MakeCommand(0x07)
+
+	conn.mu.Lock()
+	defer conn.mu.Unlock()
+	if len(conn.written) < 2 {
+		t.Fatalf("expected at least 2 writes (wake + prewarm), got %d", len(conn.written))
+	}
+	got1 := conn.written[len(conn.written)-2]
+	got2 := conn.written[len(conn.written)-1]
+	if string(got1) != string(wantWake) {
+		t.Fatalf("second-last write = % X, want wake (% X)", got1, wantWake)
+	}
+	if string(got2) != string(wantWarm) {
+		t.Fatalf("last write = % X, want prewarm 0x07 (% X)", got2, wantWarm)
 	}
 }
 
