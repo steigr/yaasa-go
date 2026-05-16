@@ -99,7 +99,7 @@ func (TinygoAdapter) Connect(addr string, timeout time.Duration) (Connection, In
 	for _, svc := range services {
 		switch svc.UUID() {
 		case serviceUUID:
-			if err := tc.discoverDeskChars(svc); err != nil {
+			if err := tc.discoverDeskChars(svc, &info); err != nil {
 				return nil, Info{}, err
 			}
 		case bluetooth.ServiceUUIDDeviceInformation:
@@ -133,12 +133,19 @@ func (c *tinygoConnection) WriteCommand(data []byte) error {
 
 // EnableNotifications registers cb as the FE62 notification handler.
 //
-// Any stale CCCD subscription is disabled first (with a 100 ms gap) to work
-// around the Lierda module's "Insufficient Resources" (ATT 0x11) behaviour on
-// reconnect.  This delay is in addition to the stabilisation sleep in
-// [TinygoAdapter.Connect].
+// The Lierda LSD4BT-E95ASTD001 module holds CCCD slots across reconnects and
+// may return ATT error 0x11 ("Insufficient Resources") when subscribing.
+// Clearing the stale subscription first reliably frees the slot.
+//
+// IMPORTANT: never call EnableNotifications(nil) between two enable attempts.
+// A successful disable clears the desk's CCCD, stopping any notification
+// stream that was already running.  A subsequent enable that returns ATT 0x11
+// leaves the CCCD cleared and no stream resumes.
+//
+// Even when the final enable write returns ATT 0x11, this firmware variant
+// still streams FE62 notifications — the error is informational only.
 func (c *tinygoConnection) EnableNotifications(cb func([]byte)) error {
-	// Disable stale subscription before re-enabling.
+	// Clear any stale CCCD subscription before re-enabling.
 	c.respChar.EnableNotifications(nil) //nolint:errcheck
 	time.Sleep(100 * time.Millisecond)
 	return c.respChar.EnableNotifications(cb)
@@ -161,10 +168,16 @@ func (c *tinygoConnection) Disconnect() error {
 }
 
 // discoverDeskChars discovers FE61 / FE62 / FE63 and stores the handles.
-func (c *tinygoConnection) discoverDeskChars(svc bluetooth.DeviceService) error {
+// FE63 is read immediately and written into info.DeviceName.
+func (c *tinygoConnection) discoverDeskChars(svc bluetooth.DeviceService, info *Info) error {
 	chars, err := svc.DiscoverCharacteristics(nil)
 	if err != nil {
 		return fmt.Errorf("discover FE60 characteristics: %w", err)
+	}
+	readStr := func(ch bluetooth.DeviceCharacteristic) string {
+		buf := make([]byte, 128)
+		n, _ := ch.Read(buf)
+		return string(buf[:n])
 	}
 	foundCmd, foundResp := false, false
 	for _, ch := range chars {
@@ -176,8 +189,7 @@ func (c *tinygoConnection) discoverDeskChars(svc bluetooth.DeviceService) error 
 			c.respChar = ch
 			foundResp = true
 		case charName:
-			// FE63 is read at discovery time so it is available in Info.
-			// (stored by the caller via discoverInfoChars)
+			info.DeviceName = readStr(ch)
 		}
 	}
 	if !foundCmd {
@@ -189,8 +201,8 @@ func (c *tinygoConnection) discoverDeskChars(svc bluetooth.DeviceService) error 
 	return nil
 }
 
-// discoverInfoChars reads Device Information Service characteristics and the
-// FE63 device name into info.  Errors are ignored — the service is optional.
+// discoverInfoChars reads Device Information Service characteristics into info.
+// Errors are ignored — the service is optional.
 func (c *tinygoConnection) discoverInfoChars(svc bluetooth.DeviceService, info *Info) {
 	chars, err := svc.DiscoverCharacteristics(nil)
 	if err != nil {
@@ -215,13 +227,6 @@ func (c *tinygoConnection) discoverInfoChars(svc bluetooth.DeviceService, info *
 			info.HardwareRev = readStr(ch)
 		case bluetooth.CharacteristicUUIDSoftwareRevisionString:
 			info.SoftwareRev = readStr(ch)
-		}
-	}
-	// FE63 — device name (part of the FE60 service, discovered separately
-	// in discoverDeskChars; read it here if present).
-	for _, ch := range chars {
-		if ch.UUID() == charName {
-			info.DeviceName = readStr(ch)
 		}
 	}
 }
