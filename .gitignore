@@ -1,5 +1,16 @@
 /.idea
+/.claude
 /bin
+
+# ad-hoc scripts and engineering session logs kept locally
 *.py
 *.log
+
+# CLI binary + cross-compiled variants from `make build*`
 /yaasa
+/yaasa-*
+
+# clib shared-library + generated header from `make dylib` / `make so`
+/libdeskcontrol.dylib
+/libdeskcontrol.so
+/libdeskcontrol.h
