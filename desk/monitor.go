@@ -231,7 +231,10 @@ func (d *Desk) heightTimeoutError(prefix string, timeout time.Duration, lastPoll
 		hint += fmt.Sprintf("\nLast poll error: %v", lastPollErr)
 	}
 	if hint != "" {
-		hint += "\nTry power-cycling the desk or removing it from macOS Bluetooth preferences\n(System Settings → Bluetooth → forget the device) then reconnect."
+		hint += "\nTry power-cycling the desk (mains off for at least 30 s, then on) and reconnect.\n" +
+			"A power-cycle clears the Lierda BLE module's CCCD state, which is what causes\n" +
+			"\"Insufficient Resources\" (ATT 0x11) after repeated reconnects.  A factory reset\n" +
+			"of the desk controller is NOT enough — the Lierda module needs actual power loss."
 	}
 	return fmt.Errorf("%s after %s%s", prefix, timeout, hint)
 }
