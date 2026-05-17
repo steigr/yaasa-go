@@ -1,3 +1,13 @@
+//go:build !darwin
+
+// On darwin, [TinygoAdapter] is implemented in adapter_darwin.go directly on
+// top of cbgo, so we can set CoreBluetooth's RestoreIdentifier option and make
+// Enable() idempotent without forking tinygo.org/x/bluetooth.  On all other
+// platforms we use the upstream tinygo BLE stack unchanged.
+//
+// See docs/tinygo-bluetooth-patches.md for the upstream divergences this split
+// avoids.
+
 package desk
 
 import (
