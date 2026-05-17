@@ -95,6 +95,28 @@ var (
 	cancelSeq     uint64
 )
 
+// ── per-handle command cancel registry ───────────────────────────────────────
+//
+// yaasa_wait_for_preset / yaasa_wait_for_height register a context.CancelFunc
+// here so C callers can interrupt an in-flight command via yaasa_cancel_command.
+
+var (
+	cmdCancelMu sync.Mutex
+	cmdCancels  = map[C.yaasa_desk_t]context.CancelFunc{}
+)
+
+func setCommandCancel(h C.yaasa_desk_t, fn context.CancelFunc) {
+	cmdCancelMu.Lock()
+	cmdCancels[h] = fn
+	cmdCancelMu.Unlock()
+}
+
+func clearCommandCancel(h C.yaasa_desk_t) {
+	cmdCancelMu.Lock()
+	delete(cmdCancels, h)
+	cmdCancelMu.Unlock()
+}
+
 func registerCancel(fn func()) uint64 {
 	id := atomic.AddUint64(&cancelSeq, 1)
 	cancelMu.Lock()
@@ -204,6 +226,22 @@ func yaasa_current_height_mm(handle C.yaasa_desk_t, timeoutMS C.int64_t, errOut 
 	return C.double(h.MM())
 }
 
+// yaasa_cancel_command cancels the in-flight yaasa_wait_for_height or
+// yaasa_wait_for_preset call for handle.  No-op if no command is running.
+//
+//export yaasa_cancel_command
+func yaasa_cancel_command(handle C.yaasa_desk_t) {
+	cmdCancelMu.Lock()
+	fn, ok := cmdCancels[handle]
+	if ok {
+		delete(cmdCancels, handle)
+	}
+	cmdCancelMu.Unlock()
+	if ok {
+		fn()
+	}
+}
+
 // yaasa_wait_for_height moves the desk to height_mm (within tolerance_mm) and
 // waits for arrival.  timeout_ms is the overall deadline.
 // Returns 0 on success, -1 on error.
@@ -232,7 +270,12 @@ func yaasa_wait_for_height(handle C.yaasa_desk_t,
 		}
 	}
 
-	err := d.WaitForHeight(context.Background(),
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	setCommandCancel(handle, cancel)
+	defer clearCommandCancel(handle)
+
+	err := d.WaitForHeight(ctx,
 		desk.HeightFromMM(float64(heightMM)),
 		desk.HeightFromMM(tol),
 		timeout, progress)
@@ -272,7 +315,12 @@ func yaasa_wait_for_preset(handle C.yaasa_desk_t,
 		}
 	}
 
-	err := d.WaitForPreset(context.Background(), int(preset), timeout, quiescence, progress)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	setCommandCancel(handle, cancel)
+	defer clearCommandCancel(handle)
+
+	err := d.WaitForPreset(ctx, int(preset), timeout, quiescence, progress)
 	setErr(errOut, err)
 	if err != nil {
 		return -1

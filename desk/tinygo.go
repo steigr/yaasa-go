@@ -133,21 +133,25 @@ func (c *tinygoConnection) WriteCommand(data []byte) error {
 
 // EnableNotifications registers cb as the FE62 notification handler.
 //
-// The Lierda LSD4BT-E95ASTD001 module holds CCCD slots across reconnects and
-// may return ATT error 0x11 ("Insufficient Resources") when subscribing.
-// Clearing the stale subscription first reliably frees the slot.
+// This is a single, direct CCCD subscribe — exactly what Bleak does on
+// macOS (BleakClient.start_notify) and what works against the Lierda
+// LSD4BT-E95ASTD001 module on the YAASA Frame Expert.
 //
-// IMPORTANT: never call EnableNotifications(nil) between two enable attempts.
-// A successful disable clears the desk's CCCD, stopping any notification
-// stream that was already running.  A subsequent enable that returns ATT 0x11
-// leaves the CCCD cleared and no stream resumes.
+// DO NOT call EnableNotifications(nil) first.  A previous version of this
+// method tried to "clear stale CCCD state" before subscribing; on this
+// firmware a successful disable clears the desk's CCCD, and if the
+// subsequent enable returns ATT 0x11 ("Insufficient Resources") the CCCD
+// stays cleared and the desk silently never sends a single notification.
+// The result is that every subsequent height/move/preset call appears to
+// "lose" the connection: pulses go out on FE61 but nothing comes back on
+// FE62 even though the desk is moving.
 //
-// Even when the final enable write returns ATT 0x11, this firmware variant
-// still streams FE62 notifications — the error is informational only.
+// If the underlying stack returns ATT 0x11 on the first try we still treat
+// the subscription as installed: on this firmware notifications do begin to
+// flow despite the error, and returning it as fatal would break every
+// caller (move/preset/monitor all need FE62).  The error is surfaced via
+// Desk.NotifyError for diagnostic display only.
 func (c *tinygoConnection) EnableNotifications(cb func([]byte)) error {
-	// Clear any stale CCCD subscription before re-enabling.
-	c.respChar.EnableNotifications(nil) //nolint:errcheck
-	time.Sleep(100 * time.Millisecond)
 	return c.respChar.EnableNotifications(cb)
 }
 

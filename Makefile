@@ -26,6 +26,8 @@ build-mac-intel:
 ##   Usage from C:  #include "libdeskcontrol.h"
 dylib:
 	go build -buildmode=c-shared -tags clib -o libdeskcontrol.dylib $(CLIB)
+	install_name_tool -id @rpath/libdeskcontrol.dylib libdeskcontrol.dylib
+	chmod 755 libdeskcontrol.dylib
 
 ## so: build C shared library for Linux (libdeskcontrol.so + .h)
 so:
