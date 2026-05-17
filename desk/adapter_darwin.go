@@ -85,15 +85,16 @@ type darwinManager struct {
 	cm  cbgo.CentralManager
 	cmd *centralDelegate
 
-	// Enable lifecycle.
-	enableMu   sync.Mutex
-	enabled    bool
-	poweredCh  chan struct{}
+	// Powered-on signal.  Created in newDarwinManager and closed exactly
+	// once when the central manager first transitions to PoweredOn.  All
+	// ensureEnabled callers block on it; close lets them all proceed.
+	poweredCh   chan struct{}
+	poweredOnce sync.Once
 
 	// Scan lifecycle.  Only one scan runs at a time — the desk package
 	// only calls Scan from a single goroutine.
 	scanMu     sync.Mutex
-	scanFilter cbgo.UUID                                  // service UUID we filter on
+	scanFilter cbgo.UUID // service UUID we filter on
 	scanCB     func(addr, name string, rssi int16)
 
 	// Pending Connect requests, keyed by peripheral identifier string.  The
@@ -118,7 +119,8 @@ func getManager() *darwinManager {
 			cm: cbgo.NewCentralManager(&cbgo.ManagerOpts{
 				RestoreIdentifier: "yaasa.ble.central",
 			}),
-			pending: make(map[string]chan connectResult),
+			pending:   make(map[string]chan connectResult),
+			poweredCh: make(chan struct{}),
 		}
 		m.cmd = &centralDelegate{m: m}
 		m.cm.SetDelegate(m.cmd)
@@ -128,36 +130,18 @@ func getManager() *darwinManager {
 }
 
 // ensureEnabled is the idempotent equivalent of upstream Adapter.Enable.  Safe
-// to call from multiple goroutines and multiple times.
+// to call from multiple goroutines and any number of times.  Returns nil as
+// soon as the central manager is powered on, or an error if it does not
+// transition to PoweredOn within 10 s.
+//
+// No mutex: cm.State() is concurrent-safe and poweredCh is set up exactly
+// once in newDarwinManager and only ever closed.
 func (m *darwinManager) ensureEnabled() error {
-	m.enableMu.Lock()
-	defer m.enableMu.Unlock()
-
 	if m.cm.State() == cbgo.ManagerStatePoweredOn {
-		m.enabled = true
 		return nil
 	}
-	if m.enabled {
-		// We already saw a powered-on transition once; the manager may
-		// be momentarily not powered (e.g. user toggled Bluetooth) —
-		// fall through and wait again.
-	}
-
-	m.poweredCh = make(chan struct{}, 1)
-	defer func() { m.poweredCh = nil }()
-
-	// The delegate is set in getManager(); the powered-on event arrives via
-	// CentralManagerDidUpdateState.  If the manager is already powered on
-	// by the time we get here, the delegate will not fire again — handle
-	// that with one more state check after registering the channel.
-	if m.cm.State() == cbgo.ManagerStatePoweredOn {
-		m.enabled = true
-		return nil
-	}
-
 	select {
 	case <-m.poweredCh:
-		m.enabled = true
 		return nil
 	case <-time.After(10 * time.Second):
 		return errors.New("timeout enabling CentralManager")
@@ -175,15 +159,7 @@ func (d *centralDelegate) CentralManagerDidUpdateState(cm cbgo.CentralManager) {
 	if cm.State() != cbgo.ManagerStatePoweredOn {
 		return
 	}
-	d.m.enableMu.Lock()
-	ch := d.m.poweredCh
-	d.m.enableMu.Unlock()
-	if ch != nil {
-		select {
-		case ch <- struct{}{}:
-		default:
-		}
-	}
+	d.m.poweredOnce.Do(func() { close(d.m.poweredCh) })
 }
 
 func (d *centralDelegate) DidDiscoverPeripheral(cm cbgo.CentralManager, p cbgo.Peripheral, ad cbgo.AdvFields, rssi int) {
@@ -305,22 +281,44 @@ func (TinygoAdapter) Connect(addr string, timeout time.Duration) (Connection, In
 
 	m.cm.Connect(p, nil)
 
-	var res connectResult
-	select {
-	case res = <-ch:
-	case <-time.After(timeout):
-		m.cm.CancelConnect(p)
-		m.pendingMu.Lock()
-		delete(m.pending, id)
-		m.pendingMu.Unlock()
-		return nil, Info{}, fmt.Errorf("connect to %s: timed out after %s", addr, timeout)
+	// Wait for a delegate event.  On timeout, CancelConnect and wait for the
+	// resulting disconnect event so the pending entry is drained and the
+	// peripheral is not left in a half-connected state.  Mirrors the wait-
+	// for-disconnect pattern in upstream tinygo's gap_darwin.go.
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	var (
+		res         connectResult
+		timedOut    bool
+		timeoutWait = 5 * time.Second
+	)
+	for {
+		select {
+		case res = <-ch:
+			if timedOut {
+				return nil, Info{}, fmt.Errorf("connect to %s: timed out after %s", addr, timeout)
+			}
+			if res.err != nil {
+				return nil, Info{}, fmt.Errorf("connect to %s: %w", addr, res.err)
+			}
+			if res.p.State() != cbgo.PeripheralStateConnected {
+				return nil, Info{}, fmt.Errorf("connect to %s: peripheral did not enter connected state", addr)
+			}
+			goto connected
+		case <-deadline.C:
+			if timedOut {
+				// CancelConnect's disconnect never came; give up.
+				m.pendingMu.Lock()
+				delete(m.pending, id)
+				m.pendingMu.Unlock()
+				return nil, Info{}, fmt.Errorf("connect to %s: timed out after %s (no disconnect after cancel)", addr, timeout)
+			}
+			timedOut = true
+			m.cm.CancelConnect(p)
+			deadline.Reset(timeoutWait)
+		}
 	}
-	if res.err != nil {
-		return nil, Info{}, fmt.Errorf("connect to %s: %w", addr, res.err)
-	}
-	if res.p.State() != cbgo.PeripheralStateConnected {
-		return nil, Info{}, fmt.Errorf("connect to %s: peripheral did not enter connected state", addr)
-	}
+connected:
 
 	conn := newDarwinConnection(m.cm, res.p)
 
@@ -359,7 +357,7 @@ type darwinConnection struct {
 
 	// Notification callback for the response characteristic.  Set by
 	// EnableNotifications; consulted in DidUpdateValueForCharacteristic.
-	notifyMu sync.RWMutex
+	notifyMu sync.Mutex
 	notifyCB func([]byte)
 
 	// Async-operation channels.  Each is non-nil exactly while a call is
@@ -552,9 +550,9 @@ func (pd *peripheralDelegate) DidUpdateValueForCharacteristic(prph cbgo.Peripher
 	// the readCh receiver only exists during an in-flight Read, so spurious
 	// signals are dropped by the non-blocking send.
 	if pd.c.haveResp && uuidEq(chr.UUID(), uuidCharResponse) && err == nil {
-		pd.c.notifyMu.RLock()
+		pd.c.notifyMu.Lock()
 		cb := pd.c.notifyCB
-		pd.c.notifyMu.RUnlock()
+		pd.c.notifyMu.Unlock()
 		if cb != nil {
 			// Copy the value so the callback owns a stable slice — cbgo
 			// reuses the underlying NSData buffer across callbacks.
