@@ -18,6 +18,9 @@ import (
 var (
 	flagVerbose        bool
 	flagConnectTimeout time.Duration
+	version            = "dev"
+	commit             = "unknown"
+	buildDate          = "unknown"
 )
 
 func main() {
@@ -30,6 +33,7 @@ func rootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:   "yaasa",
 		Short: "Control a Yaasa (Jiecang FE60) standing desk over BLE",
+		Version: fmt.Sprintf("%s (commit %s, built %s)", version, commit, buildDate),
 		Long: strings.Join([]string{
 			"yaasa controls a Yaasa Frame Expert (or compatible Jiecang FE60) desk.",
 			"",
@@ -57,6 +61,7 @@ func rootCmd() *cobra.Command {
 		moveCmd(),
 		presetCmd(),
 		monitorCmd(),
+		versionCmd(),
 		statusCmd(),
 		quitCmd(),
 	)
@@ -647,6 +652,19 @@ func statusCmd() *cobra.Command {
 			}
 			fmt.Printf("Notifications: %s\n", notifyStr)
 			return nil
+		},
+	}
+}
+
+// ── version ───────────────────────────────────────────────────────────────────
+
+func versionCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "version",
+		Short: "Print CLI version/build information",
+		Args:  cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			fmt.Printf("yaasa %s\n", cmd.Root().Version)
 		},
 	}
 }

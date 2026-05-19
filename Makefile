@@ -2,24 +2,36 @@ BINARY  := yaasa
 MODULE  := github.com/steigr/yaasa-go
 CMD     := ./cmd/yaasa
 CLIB    := ./clib/
+VERSION ?= dev
+COMMIT  := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+DATE    := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.buildDate=$(DATE)
 
-.PHONY: build build-linux build-mac-arm build-mac-intel dylib so tidy clean help
+.PHONY: build build-linux build-mac-arm build-mac-intel release-check release-artifacts dylib so tidy clean help
 
 ## build: build CLI for the current platform
 build:
-	go build -o $(BINARY) $(CMD)
+	go build -ldflags "$(LDFLAGS)" -o $(BINARY) $(CMD)
 
 ## build-linux: cross-compile CLI for Linux amd64
 build-linux:
-	GOOS=linux GOARCH=amd64 go build -o $(BINARY)-linux-amd64 $(CMD)
+	GOOS=linux GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o $(BINARY)-linux-amd64 $(CMD)
 
 ## build-mac-arm: cross-compile CLI for macOS Apple Silicon
 build-mac-arm:
-	GOOS=darwin GOARCH=arm64 go build -o $(BINARY)-darwin-arm64 $(CMD)
+	GOOS=darwin GOARCH=arm64 go build -ldflags "$(LDFLAGS)" -o $(BINARY)-darwin-arm64 $(CMD)
 
 ## build-mac-intel: cross-compile CLI for macOS Intel
 build-mac-intel:
-	GOOS=darwin GOARCH=amd64 go build -o $(BINARY)-darwin-amd64 $(CMD)
+	GOOS=darwin GOARCH=amd64 go build -ldflags "$(LDFLAGS)" -o $(BINARY)-darwin-amd64 $(CMD)
+
+## release-check: run core quality gates used by release candidates
+release-check:
+	go test ./...
+	go test -race ./...
+
+## release-artifacts: build tested release binaries on this host
+release-artifacts: build build-linux build-mac-arm
 
 ## dylib: build C shared library for macOS (libdeskcontrol.dylib + .h)
 ##   Also requires Xcode Command Line Tools (CoreBluetooth via CGo).

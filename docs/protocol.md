@@ -94,6 +94,54 @@ command — useful as a probe, unreliable as a guaranteed query.
 | 0xA2 | Sit/stand time   | `[standH, standM, standS, sitH, sitM, sitS]` | Plain binary HH:MM:SS — **not BCD**. Each counter is the live accumulated time         |
 | 0xAA | All-time stats   | (firmware-specific)                    | Yaasa firmware; not real-time, do not use for live counters                                      |
 
+## Desk firmware state model
+
+The Jiecang FE60 controller as observed over BLE. Transitions are labelled with
+the frames exchanged on FE61 (rx, host → desk) and FE62 (tx, desk → host).
+
+```mermaid
+stateDiagram-v2
+    [*] --> Standby
+
+    Standby --> Awake: rx 0x00 wake
+    Awake --> Standby: prolonged firmware idle
+
+    Awake --> Awake: rx 0x03 / 0x04 save preset
+    Awake --> Awake: rx 0xA2 ack with 0xA2 payload
+    Awake --> Awake: rx 0x07 occasional delayed 0x01
+
+    Awake --> Moving: rx motion opcode
+    Moving --> Moving: pulse repeated, tx 0x01 height stream
+    Moving --> Awake: rx 0x2B stop
+    Moving --> Awake: pulse gap > ~250 ms
+    Moving --> Awake: 0x1B target or preset reached
+
+    note right of Awake
+      Wake is sent 3x with 100 ms gaps
+      before motion (host convention).
+      Physical Up/Down buttons drive
+      motion directly; the desk still
+      streams 0x01 height on FE62.
+    end note
+
+    note right of Moving
+      Motion opcodes: 0x01 up, 0x02 down,
+      0x1B move-to [mm_hi mm_lo],
+      0x05 preset1, 0x06 preset2.
+      Single pulse is ~17 mm of travel
+      from motor inertia.
+    end note
+```
+
+Notes:
+- The Lierda BLE bridge has its own ~30 s idle timeout; the host keep-alive
+  (`0x07` every 5 s) is needed to keep the BLE link up regardless of the desk
+  controller's own state. Wake state (above) and BLE link state are separate
+  concerns.
+- "Pulse repeated" applies to the *same* motion opcode. The desk treats
+  `0x1B`, `0x05`, `0x06` as continuous direction commands; if pulses stop the
+  motor stops, but the controller stays Awake.
+
 ## Height encoding
 
 `payload[0:2]` of a `0x01` notification is the height as a big-endian uint16 in
@@ -146,9 +194,9 @@ firmware. Height notifications (`0x01`) only stream during actual movement.
 
 The library handles this with a cache-first strategy:
 
-| State                                              | Path                                                                      |
-|----------------------------------------------------|---------------------------------------------------------------------------|
-| Any notification has been received since connect   | Return cached value instantly. Cache is updated by every `0x01` notification |
+| State                                              | Path                                                                                                                                                            |
+|----------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Any notification has been received since connect   | Return cached value instantly. Cache is updated by every `0x01` notification                                                                                    |
 | Cold start, no notification yet                    | Send `0x07` and wait up to 5 s for the *occasional* delayed `0x01` response; if it doesn't arrive, error out and ask the caller to run any motion command first |
 
 Any motion command (up/down/preset/move) produces a burst of notifications
@@ -197,18 +245,120 @@ hardware by sitting for exactly 48 seconds and observing `sitS` increment by
 48. The counters update live in firmware; each request returns the current
 second.
 
+## Client state machine (yaasa-go)
+
+How this library drives the desk. Each transition shows the FE61 commands the
+client emits and the FE62 frames it consumes. The `Idle` state is the steady
+state after a successful connect; everything else is either setup or one of
+three motion / query workflows.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Scanning
+    Scanning --> Connecting: pick FE60 advert
+    Connecting --> Discovering: GATT link up
+    Discovering --> Stabilising: FE60 + DIS chars resolved
+    Stabilising --> Subscribing: 300 ms settle
+    Subscribing --> Waking: CCCD write on FE62
+    Waking --> PreWarming: tx 0x00 single wake
+    PreWarming --> Idle: tx 0x07 cache pre-warm
+
+    Idle --> Idle: rx 0x01 / 0xA2 cache + listener fanout
+
+    Idle --> CurrentHeight: caller requests height
+    CurrentHeight --> Idle: cache hit, return instantly
+    CurrentHeight --> ColdProbe: no notification seen yet
+    ColdProbe --> Idle: rx 0x01 within 5 s
+    ColdProbe --> Idle: timeout, return error
+
+    Idle --> WaitForHeight: target requested
+    WaitForHeight --> WaitForHeight: tx 0x1B on 200 ms ticker
+    WaitForHeight --> Idle: rx 0x01 near target, tx 0x2B
+    WaitForHeight --> Idle: timeout / cancel, tx 0x2B
+
+    Idle --> WaitForPreset: preset 1 or 2
+    WaitForPreset --> WaitForPreset: tx 0x05 / 0x06 on 200 ms ticker
+    WaitForPreset --> Idle: 500 ms quiescence in 0x01 stream, tx 0x2B
+    WaitForPreset --> Idle: timeout / cancel, tx 0x2B
+
+    Idle --> Idle: FetchSitStandTime: tx 0xA2, await rx 0xA2 (>=5 s)
+
+    Idle --> Disconnected: Disconnect()
+    Disconnected --> [*]
+
+    note left of Subscribing
+      MUST precede any FE61 write
+      on the Lierda module, else
+      ATT 0x11 Insufficient Resources.
+      Single direct CCCD write; do
+      NOT disable-then-enable.
+    end note
+
+    note right of WaitForHeight
+      WaitForHeight first sends
+      0x00 x3 wake with 100 ms gaps,
+      then 0x1B immediately, then the
+      200 ms ticker. The first pulse
+      bypasses the ticker cold-start.
+      200 ms < ~250 ms firmware
+      auto-stop window.
+    end note
+
+    note right of WaitForPreset
+      Stored preset target is not
+      exposed by firmware; arrival is
+      inferred by quiescence in the
+      0x01 height stream.
+    end note
+```
+
+Interface layering (top consumer → BLE wire):
+
+```
+cmd/yaasa CLI     clib (C lib)     internal/ipc daemon
+        \             |                /
+         \            v               /
+          ---->   desk.Desk   <-------
+                      |
+              (Connection iface)
+                      |
+                      v
+              TinygoAdapter
+              darwin: cbgo direct
+              other:  tinygo.org/x/bluetooth
+                      |
+                      v
+        CoreBluetooth (macOS) / BlueZ (Linux)
+                      |
+              GATT FE61 write / FE62 notify
+                      |
+                      v
+        Lierda LSD4BT-E95ASTD001 BLE module
+                      |
+              UART @ 9600 bps over RJ12
+                      |
+                      v
+        Jiecang FE60 controller --> motor
+```
+
+`desk.Desk` owns the protocol logic (pulse cadence, arrival detection, caches,
+listener fanout). `desk.Connection` is the narrow GATT interface every adapter
+implements: `WriteCommand`, `EnableNotifications`, `ReadResponse`, `Disconnect`.
+The split keeps the FE60 protocol code stack-agnostic so the same `Desk` works
+against `cbgo` on macOS and the upstream tinygo stack everywhere else.
+
 ## Firmware-quirk reference
 
 These all stem from the Lierda LSD4BT-E95ASTD001 BLE module, not the Jiecang
 desk controller. Symptoms and recovery:
 
-| Symptom                                                                       | Cause                                                          | Recovery                                                                                          |
-|-------------------------------------------------------------------------------|----------------------------------------------------------------|---------------------------------------------------------------------------------------------------|
-| CCCD write returns ATT 0x11 (`Insufficient Resources`), no notifications flow | Lierda CCCD slot exhausted by accumulated stale subscriptions  | **Power-cycle the desk: mains off for ≥ 30 s, then on.** A factory reset of the desk controller is not enough — only loss of power resets the Lierda module |
-| CCCD write returns ATT 0x11, but notifications DO flow                        | Some firmware variants ACK the CCCD with an error but stream anyway | Surface the error for diagnostics; treat it as non-fatal                                       |
-| Wake works, no notifications ever arrive                                      | First FE61 write happened before the CCCD subscription         | Subscribe to FE62 first, then wake                                                               |
-| Notifications stopped mid-session                                             | Disable-then-enable pattern cleared the CCCD                   | Don't write CCCD = 0 before subscribing; use a single direct subscribe                           |
-| Link drops after ~30 s of idle                                                | BLE module's idle timeout                                      | Send `0x07` on FE61 every 5 s as a heartbeat                                                     |
+| Symptom                                                                       | Cause                                                               | Recovery                                                                                                                                                    |
+|-------------------------------------------------------------------------------|---------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| CCCD write returns ATT 0x11 (`Insufficient Resources`), no notifications flow | Lierda CCCD slot exhausted by accumulated stale subscriptions       | **Power-cycle the desk: mains off for ≥ 30 s, then on.** A factory reset of the desk controller is not enough — only loss of power resets the Lierda module |
+| CCCD write returns ATT 0x11, but notifications DO flow                        | Some firmware variants ACK the CCCD with an error but stream anyway | Surface the error for diagnostics; treat it as non-fatal                                                                                                    |
+| Wake works, no notifications ever arrive                                      | First FE61 write happened before the CCCD subscription              | Subscribe to FE62 first, then wake                                                                                                                          |
+| Notifications stopped mid-session                                             | Disable-then-enable pattern cleared the CCCD                        | Don't write CCCD = 0 before subscribing; use a single direct subscribe                                                                                      |
+| Link drops after ~30 s of idle                                                | BLE module's idle timeout                                           | Send `0x07` on FE61 every 5 s as a heartbeat                                                                                                                |
 
 ## References
 
@@ -221,5 +371,5 @@ desk controller. Symptoms and recovery:
 - [Bennett-Wendorf/uplift-desk-controller](https://github.com/Bennett-Wendorf/uplift-desk-controller)
   — Python BLE library for Uplift desks.
 - [Bleak](https://github.com/hbldh/bleak) — Python BLE library that
-  successfully subscribes to FE62 on macOS and serves as the behavioural
+  successfully subscribes to FE62 on macOS and serves as the behavioral
   reference for what tinygo + cbgo should produce.
